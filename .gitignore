@@ -1,0 +1,19 @@
+# Environment variables — never commit secrets
+.env
+
+# Google service account key files
+*.json
+!package.json
+
+# Database dump files
+*.dump
+*.sql
+*.tar
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# rclone config (contains credentials)
+rclone.conf
+

@@ -1,0 +1,116 @@
+name: Supabase Database Backup
+
+on:
+  schedule:
+    - cron: '0 2 * * 0'   # Weekly on Sunday at 2:00 AM UTC
+  workflow_dispatch:        # Allow manual trigger from GitHub Actions UI
+
+jobs:
+  backup:
+    name: Backup Supabase DB → Google Drive
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      # ── 1. Install PostgreSQL client (for pg_dump) ──────────────────────────
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y postgresql-client
+
+      # ── 2. Install rclone ────────────────────────────────────────────────────
+      - name: Install rclone
+        run: |
+          curl https://rclone.org/install.sh | sudo bash
+          rclone version
+
+      # ── 3. Configure rclone with Google Drive service account ────────────────
+      - name: Configure rclone
+        env:
+          GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
+          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+        run: |
+          mkdir -p ~/.config/rclone
+
+          # Write service account credentials to a temp file
+          echo "$GDRIVE_SERVICE_ACCOUNT_JSON" > /tmp/gdrive-sa.json
+
+          # Create rclone config pointing to Google Drive
+          cat > ~/.config/rclone/rclone.conf << EOF
+          [gdrive]
+          type = drive
+          scope = drive
+          service_account_file = /tmp/gdrive-sa.json
+          root_folder_id = ${GDRIVE_FOLDER_ID}
+          EOF
+
+          echo "✅ rclone configured"
+
+      # ── 4. Dump the database ─────────────────────────────────────────────────
+      - name: Dump database
+        env:
+          DATABASE_URL: ${{ secrets.SUPABASE_DATABASE_URL }}
+        run: |
+          TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
+          FILENAME="backup_${TIMESTAMP}.dump"
+          echo "FILENAME=$FILENAME" >> $GITHUB_ENV
+
+          pg_dump "$DATABASE_URL" \
+            --format=custom \
+            --no-acl \
+            --no-owner \
+            --file="$FILENAME"
+
+          echo "✅ Backup created: $FILENAME ($(du -sh $FILENAME | cut -f1))"
+
+      # ── 5. Upload to Google Drive ────────────────────────────────────────────
+      - name: Upload to Google Drive
+        run: |
+          rclone copy "$FILENAME" gdrive:supabase-backups/ \
+            --progress \
+            --stats-one-line
+
+          echo "✅ Uploaded to Google Drive: supabase-backups/$FILENAME"
+
+      # ── 6. Delete local dump file ────────────────────────────────────────────
+      - name: Clean up local file
+        run: rm -f "$FILENAME"
+
+      # ── 7. Delete old backups from Google Drive (keep last 90 days) ──────────
+      - name: Prune old backups from Google Drive
+        run: |
+          CUTOFF_DATE=$(date -d '90 days ago' +%Y-%m-%d)
+
+          echo "🔍 Looking for backups older than $CUTOFF_DATE..."
+
+          rclone lsf gdrive:supabase-backups/ --format "tp" | while IFS=';' read -r MODTIME FILEPATH; do
+            FILE_DATE=$(echo "$MODTIME" | cut -c1-10)
+            if [[ "$FILE_DATE" < "$CUTOFF_DATE" ]] && [[ -n "$FILEPATH" ]]; then
+              echo "🗑️  Deleting old backup: $FILEPATH (modified: $FILE_DATE)"
+              rclone deletefile "gdrive:supabase-backups/$FILEPATH"
+            fi
+          done
+
+          echo "✅ Pruning complete. Keeping backups newer than $CUTOFF_DATE."
+
+      # ── 8. Notify SUCCESS via Telegram ───────────────────────────────────────
+      - name: Telegram — success notification
+        if: success()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          MESSAGE="✅ *Supabase Backup Successful*%0A%0A📦 File: %60${FILENAME}%60%0A📅 Date: $(date '+%Y-%m-%d %H:%M:%S UTC')%0A☁️ Stored in: Google Drive › supabase-backups/"
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data "chat_id=${TELEGRAM_CHAT_ID}&text=${MESSAGE}&parse_mode=Markdown"
+
+      # ── 9. Notify FAILURE via Telegram ───────────────────────────────────────
+      - name: Telegram — failure notification
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          MESSAGE="❌ *Supabase Backup FAILED*%0A%0A📅 Date: $(date '+%Y-%m-%d %H:%M:%S UTC')%0A🔗 Logs: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data "chat_id=${TELEGRAM_CHAT_ID}&text=${MESSAGE}&parse_mode=Markdown"
