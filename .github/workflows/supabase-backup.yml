@@ -12,11 +12,22 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      # ── 1. Install PostgreSQL client (for pg_dump) ──────────────────────────
-      - name: Install PostgreSQL client
+      # ── 1. Install PostgreSQL 17 client (must match Supabase server version) ─
+      - name: Install PostgreSQL 17 client
         run: |
+          # Add official PostgreSQL APT repo
+          sudo apt-get install -y curl ca-certificates
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc --fail \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          sudo sh -c 'echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
+            https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            > /etc/apt/sources.list.d/pgdg.list'
           sudo apt-get update -qq
           sudo apt-get install -y postgresql-client-17
+
+          # Confirm version matches Supabase server (17.x)
+          pg_dump --version
 
       # ── 2. Install rclone ────────────────────────────────────────────────────
       - name: Install rclone
@@ -36,13 +47,13 @@ jobs:
           echo "$GDRIVE_SERVICE_ACCOUNT_JSON" > /tmp/gdrive-sa.json
 
           # Create rclone config pointing to Google Drive
-          cat > ~/.config/rclone/rclone.conf << EOF
+          cat > ~/.config/rclone/rclone.conf << RCLONE
           [gdrive]
           type = drive
           scope = drive
           service_account_file = /tmp/gdrive-sa.json
           root_folder_id = ${GDRIVE_FOLDER_ID}
-          EOF
+          RCLONE
 
           echo "✅ rclone configured"
 
